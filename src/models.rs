@@ -10,3 +10,10 @@ pub struct Link {
     pub original: String,
     pub created: PgTimestamp,
 }
+
+#[derive(Insertable)]
+#[diesel(table_name = crate::schema::links)]
+pub struct NewLink<'a> {
+    pub short: &'a String,
+    pub original: &'a String,
+}

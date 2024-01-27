@@ -2,14 +2,16 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 
 use diesel::prelude::*;
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use link_shortener::establish_connection;
+use link_shortener::generate_short;
 use link_shortener::models::*;
+use link_shortener::schema::links;
 use tokio::net::TcpListener;
 
 async fn link_service(
@@ -24,9 +26,42 @@ async fn link_service(
         }
         (&Method::POST, "/") => {
             // Create link in database and return 201
-            return Ok(Response::new(Full::new(Bytes::from(
-                "Hello from hyper test",
-            ))));
+
+            let body_buff = req.collect().await;
+
+            let mut host = String::from("http://localhost:3000/");
+            let mut url = String::from("");
+
+            for (k, e) in form_urlencoded::parse(&body_buff.unwrap().to_bytes()) {
+                if k == "url" {
+                    url = e.to_string();
+                }
+                if k == "host" {
+                    host = e.to_string();
+                }
+            }
+
+            if url == "" || !url.starts_with("http") {
+                return Ok(Response::new(Full::new(Bytes::from("Invalid url"))));
+            }
+
+            let new_link = NewLink {
+                original: &url,
+                short: &generate_short(&url),
+            };
+
+            println!("Inserting new link: {:?}", new_link.short);
+
+            diesel::insert_into(links::table)
+                .values(&new_link)
+                .returning(Link::as_select())
+                .get_result(conn)
+                .expect("Error saving new link");
+
+            return Ok(Response::new(Full::new(Bytes::from(format!(
+                "{}{}",
+                host, new_link.short
+            )))));
         }
         _ => {
             use link_shortener::schema::links::dsl::*;
