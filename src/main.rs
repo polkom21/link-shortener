@@ -2,9 +2,8 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 
 use diesel::prelude::*;
-use http_body_util::{combinators::BoxBody, BodyExt, Full, StreamBody};
+use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::body::Bytes;
-use hyper::body::Frame;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -12,11 +11,11 @@ use hyper_util::rt::TokioIo;
 use link_shortener::establish_connection;
 use link_shortener::generate_short;
 use link_shortener::models::*;
+use link_shortener::run_migrations;
 use link_shortener::schema::links;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
-use tokio_util::io::ReaderStream;
 
 static INDEX: &str = "templates/index.html";
 static NOTFOUND: &[u8] = b"Not Found";
@@ -60,6 +59,7 @@ async fn link_service(
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<BoxBody<Bytes, std::io::Error>>, Infallible> {
     let conn = &mut establish_connection();
+    run_migrations(conn).unwrap();
 
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/") => simple_file_send(INDEX).await,
@@ -137,7 +137,7 @@ async fn link_service(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
 
     // We create a TcpListener and bind it to 127.0.0.1:3000
     let listener = TcpListener::bind(addr).await?;
