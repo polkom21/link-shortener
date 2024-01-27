@@ -456,6 +456,7 @@ dependencies = [
  "hyper-util",
  "sha2",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

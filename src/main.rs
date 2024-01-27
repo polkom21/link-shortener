@@ -2,8 +2,9 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 
 use diesel::prelude::*;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{combinators::BoxBody, BodyExt, Full, StreamBody};
 use hyper::body::Bytes;
+use hyper::body::Frame;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -12,18 +13,56 @@ use link_shortener::establish_connection;
 use link_shortener::generate_short;
 use link_shortener::models::*;
 use link_shortener::schema::links;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
+use tokio_util::io::ReaderStream;
+
+static INDEX: &str = "templates/index.html";
+static NOTFOUND: &[u8] = b"Not Found";
+
+/// HTTP status code 404
+fn not_found() -> Response<BoxBody<Bytes, std::io::Error>> {
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(Full::new(NOTFOUND.into()).map_err(|e| match e {}).boxed())
+        .unwrap()
+}
+
+async fn simple_file_send(
+    filename: &str,
+) -> Result<Response<BoxBody<Bytes, std::io::Error>>, Infallible> {
+    // Open file for reading
+    let file = File::open(filename).await;
+    if file.is_err() {
+        eprintln!("ERROR: Unable to open file.");
+        return Ok(not_found());
+    }
+
+    let mut file: File = file.unwrap();
+
+    let mut content = Vec::new();
+
+    file.read_to_end(&mut content).await.unwrap();
+
+    let boxed_body = Full::new(content.into()).map_err(|e| match e {}).boxed();
+
+    // Send response
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .body(boxed_body)
+        .unwrap();
+
+    Ok(response)
+}
 
 async fn link_service(
     req: Request<hyper::body::Incoming>,
-) -> Result<Response<Full<Bytes>>, Infallible> {
+) -> Result<Response<BoxBody<Bytes, std::io::Error>>, Infallible> {
     let conn = &mut establish_connection();
 
     match (req.method(), req.uri().path()) {
-        (&Method::GET, "/") => {
-            // Return html form
-            return Ok(Response::new(Full::new(Bytes::from("Hello from hyper"))));
-        }
+        (&Method::GET, "/") => simple_file_send(INDEX).await,
         (&Method::POST, "/") => {
             // Create link in database and return 201
 
@@ -42,7 +81,11 @@ async fn link_service(
             }
 
             if url == "" || !url.starts_with("http") {
-                return Ok(Response::new(Full::new(Bytes::from("Invalid url"))));
+                return Ok(Response::new(
+                    Full::new("Invalid url".into())
+                        .map_err(|e| match e {})
+                        .boxed(),
+                ));
             }
 
             let new_link = NewLink {
@@ -58,10 +101,11 @@ async fn link_service(
                 .get_result(conn)
                 .expect("Error saving new link");
 
-            return Ok(Response::new(Full::new(Bytes::from(format!(
-                "{}{}",
-                host, new_link.short
-            )))));
+            return Ok(Response::new(
+                Full::new(Bytes::from(format!("{}{}", host, new_link.short)).into())
+                    .map_err(|e| match e {})
+                    .boxed(),
+            ));
         }
         _ => {
             use link_shortener::schema::links::dsl::*;
@@ -74,14 +118,18 @@ async fn link_service(
                 .expect("Error loading posts");
 
             if results.len() == 0 {
-                return Ok(Response::new(Full::new(Bytes::from("Not found url 404"))));
+                return Ok(not_found());
             }
 
             // redirect 301
             return Ok(Response::builder()
                 .status(StatusCode::MOVED_PERMANENTLY)
                 .header("Location", results[0].original.clone())
-                .body(Full::new(Bytes::from("")))
+                .body(
+                    Full::new("Redirect...".into())
+                        .map_err(|e| match e {})
+                        .boxed(),
+                )
                 .unwrap());
         }
     }
@@ -105,7 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let io = TokioIo::new(stream);
 
         // Spawn a tokio task to serve multiple connections concurrently
-        tokio::task::spawn(async move {
+        let _server = tokio::task::spawn(async move {
             if let Err(err) = http1::Builder::new()
                 // `service_fn` converts our function in a `Service`
                 .serve_connection(io, service_fn(link_service))
